@@ -529,8 +529,6 @@ Rules:
 - Copy all numeric values VERBATIM from fragments — do NOT convert any units
 - "confidence": "explicit" if value and unit clearly stated; "inferred" if unit assumed
 - Depths may be in ft or m — emit whatever appears, with the exact unit label
-- AAODC cement-out pressure test: emit as type "lot_fit", test_type "casing_shoe_test", \
-  use the mud weight from the mud record section as "emw" with the unit as it appears
 - If the same data point appears in multiple fragments, emit it once from the highest-priority source
 - Emit one observation per distinct data point (3 different LOT depths → 3 observations)
 - Do NOT emit observations where all numeric fields are null
@@ -1219,8 +1217,7 @@ class LotFitObservation:
     emw_g_cm3: float | None = None
     casing_size: str | None = None
     provenance_class: str = "not_reported"
-    # "explicit_lot" | "explicit_fit" | "explicit_shoe_test" |
-    # "inferred_min_integrity" | "not_reported"
+    # "explicit_lot" | "explicit_fit" | "inferred_min_integrity" | "not_reported"
     is_explicit: bool = True
     source_doc_type: str = ""
     source_priority: int = 0
