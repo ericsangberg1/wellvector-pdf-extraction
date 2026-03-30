@@ -537,6 +537,36 @@ _CASING_SIZE_MAP: dict[str, tuple[str, float]] = {
     "4-1/2": ("liner",         4.5),
 }
 
+# Reverse map: float diameter → standard fractional display string
+_DIAM_TO_FRACTION: dict[float, str] = {
+    30.0:   "30",
+    26.0:   "26",
+    20.0:   "20",
+    18.625: "18 5/8",
+    17.5:   "17 1/2",
+    16.0:   "16",
+    13.375: "13 3/8",
+    13.625: "13 5/8",
+    12.25:  "12 1/4",
+    9.625:  "9 5/8",
+    8.5:    "8 1/2",
+    7.0:    "7",
+    6.0:    "6",
+    5.5:    "5 1/2",
+    5.0:    "5",
+    4.5:    "4 1/2",
+    36.0:   "36",
+    24.0:   "24",
+}
+
+
+def _fmt_diam(v) -> str:
+    """Format a diameter float as a standard fractional string (e.g. 13.375 → '13 3/8"')."""
+    if v is None:
+        return ""
+    s = _DIAM_TO_FRACTION.get(float(v), str(v))
+    return s + '"'
+
 
 def parse_casing_size(size_str) -> tuple[str | None, float | None]:
     """Return (casing_type, diameter_in) from a size string like '13-3/8' or '339.7mm'."""
@@ -2984,11 +3014,13 @@ async def main():
             return s.replace(".", ",")
         return s
 
+    _DIAM_FIELDS = {"casing_diameter_in", "hole_diameter_in"}
+
     def eu_row(row: dict, key_map: dict | None = None) -> dict:
         out = {}
         for k, v in row.items():
             display_key = key_map.get(k, k) if key_map else k
-            out[display_key] = to_eu(v)
+            out[display_key] = _fmt_diam(v) if k in _DIAM_FIELDS else to_eu(v)
         return out
 
     # Primary CSV — clean 8-column output matching the evaluation schema
