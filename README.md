@@ -8,11 +8,21 @@ Output: Structured CSV with casing strings, shoe depths, hole sizes, and LOT/FIT
 ## Pipeline
 
 ```
-CSV filter
+CSV / URL input
   → async PDF download (cached)
-  → Universal Document Scan (Haiku)
-  → Collector (Haiku)
-  → Synthesizer (Sonnet)
+  → Universal Document Scan (Haiku)        — relevance gate: skip irrelevant docs,
+  |                                           identify candidate pages and anchor docs
+  ↓ relevant docs only
+  → Page audit (PyMuPDF)                   — digital pages → send as text (cheap)
+  |                                           scanned pages → render as JPEG image
+  ↓ per candidate page
+  → Collector (Haiku)                      — extract fragments: casing rows, LOT/FIT values
+  |                                           tagged with confidence: explicit / schematic / approximate
+  ↓ all fragments per wellbore
+  → Synthesizer (Sonnet)                   — emit raw observations from all fragments
+  → Post-processing (Python)               — merge by scaffold priority, resolve conflicts,
+  |                                           match LOT values to casing shoes
+  ↓
   → casing_data.csv + casing_conflicts.csv
 ```
 
