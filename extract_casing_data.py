@@ -436,7 +436,11 @@ Assign each fragment a topic:
 Each fragment must include a "confidence" field:
 - "explicit"    — value and unit are clearly stated in a structured table or labelled test record
 - "schematic"   — value is read from a wellbore diagram, completion schematic, or depth track \
-(depths annotated on a graphical wellbore cross-section, not a table)
+(depths annotated on a graphical wellbore cross-section, not a table). \
+For mud weight / LOT values on depth-vs-mud-weight graphs: only associate a LOT label with a \
+casing string if the label is horizontally aligned with that casing's shoe depth marker on the \
+depth axis, or if the label explicitly names the casing string. Do not assign a LOT value to a \
+casing string based on proximity alone.
 - "approximate" — value is estimated, described as "approximately", preceded by "~", \
 or otherwise uncertain
 

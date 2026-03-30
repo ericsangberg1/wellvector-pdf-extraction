@@ -53,8 +53,8 @@ Each run writes to a new `Runs/runN/` directory:
 
 | File | Contents |
 |---|---|
-| `casing_data.csv` | Synthesized rows with source provenance and conflict flags |
-| `casing_conflicts.csv` | Per-field conflict log with both values, sources, severity, resolution |
+| `casing_data.csv` | Clean 8-column output: wellbore, casing type, casing/hole diameters and depths, mud weight, formation test type |
+| `casing_conflicts.csv` | Per-field conflict log — where sources disagreed, showing both values and how it was resolved |
 | `fragments.json` | Raw collected fragments (used for re-synthesis without re-running collection) |
 | `run_info.json` | Timestamp, config snapshot, script MD5 |
 
