@@ -425,6 +425,13 @@ extract the casing rows as "casing_data" and skip only the DST rows. Do not skip
 Capture values VERBATIM with whatever units appear on the page (feet, metres, inches, mm, \
 ppg, g/cm³, psi, etc.). Do NOT convert units — the synthesizer handles all conversion.
 
+CRITICAL — plain-text and monospace tables: Some tables are formatted with fixed-width columns \
+in plain text (e.g. typewriter-style WDSS pages). When a row has blank cells in the middle, \
+the values in later columns remain in their original horizontal positions — they do NOT shift left. \
+Use the column headers to determine which value belongs to which column based on horizontal \
+alignment, not row order. A value printed far to the right belongs to the rightmost applicable \
+column even if middle columns are empty for that row.
+
 When a table row combines casing and formation test data (e.g. LOT mud weight on the same \
 row as casing diameter), keep them in ONE fragment (topic "casing_data").
 
@@ -527,6 +534,9 @@ Rules:
 - If the same data point appears in multiple fragments, emit it once from the highest-priority source
 - Emit one observation per distinct data point (3 different LOT depths → 3 observations)
 - Do NOT emit observations where all numeric fields are null
+- CONFIRMED ABSENT: If an explicit fragment for a casing string says a LOT/FIT value is \
+  "not listed" or absent, do NOT emit a lot_fit observation for that casing from any \
+  schematic or lower-confidence fragment. The explicit "not listed" overrides schematic claims.
 - Return ONLY valid JSON. No prose, no markdown fences.
 
 {fragments_block}\
@@ -1500,11 +1510,6 @@ def _compute_scan_score(result: "DocumentScanResult") -> float:
         score += 2.0
     # More casings visible = more complete
     score += min(result.casing_count, 5) * 0.5
-    # Formation test data
-    if result.has_lot_fit:
-        score += 2.0
-    if result.has_dst:
-        score += 1.0
     # Bonus for official NPD sources (authoritative)
     doc_upper = result.doc_name.upper()
     type_upper = result.doc_type.upper()
@@ -1600,10 +1605,6 @@ def _parse_scan_response(text: str, doc_name: str, doc_type: str, wellbore: str,
         else:
             relevance_class = "uncertain_needs_escalation"
 
-    # DST-only documents: if the scan sees DST data but no casing table, mark irrelevant.
-    # DST interval depths are not casing data and the scan prompt cannot reliably distinguish them.
-    if defaults["has_dst"] and defaults["casing_table"] == "none" and not defaults["has_lot_fit"]:
-        relevance_class = "irrelevant"
 
     # Parse wellbore names from the raw string
     raw_wb = defaults["wellbores_raw"]
