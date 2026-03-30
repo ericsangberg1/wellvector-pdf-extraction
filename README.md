@@ -11,7 +11,7 @@ Output: Structured CSV with casing strings, shoe depths, hole sizes, and LOT/FIT
 CSV / URL input
   → async PDF download (cached)
   → Universal Document Scan (Haiku)        — relevance gate: skip irrelevant docs,
-  |                                           identify candidate pages and anchor docs
+  |   + Screen (Haiku, pages 1–4)            identify candidate pages, check for ToC
   ↓ relevant docs only
   → Page audit (PyMuPDF)                   — digital pages → send as text (cheap)
   |                                           scanned pages → render as JPEG image
@@ -20,19 +20,19 @@ CSV / URL input
   |                                           tagged with confidence: explicit / schematic / approximate
   ↓ all fragments per wellbore
   → Synthesizer (Sonnet)                   — emit raw observations from all fragments
-  → Post-processing (Python)               — merge by scaffold priority, resolve conflicts,
-  |                                           match LOT values to casing shoes
+  → Post-processing (Python)               — scaffold locking, merge by priority,
+  |                                           resolve conflicts, match LOT to casing shoes
   ↓
   → casing_data.csv + casing_conflicts.csv
 ```
 
-**Universal Document Scan** — Each PDF is assessed for relevance before any data extraction runs. The scan identifies whether the document contains a casing programme or LOT/FIT tests, locates candidate data pages, and checks for a table of contents. Documents that are clearly irrelevant (core reports, petrophysics, DST-only, etc.) are skipped entirely. The scan result also provides page hints that restrict collection to only the pages likely to contain data.
+**Universal Document Scan** — Each PDF is assessed for relevance before any data extraction runs. The scan identifies whether the document contains a casing programme or LOT/FIT tests and locates candidate data pages. In parallel, a screen call checks the first 1–4 pages for a table of contents — if found, page references from the ToC are used to restrict collection instead of the scan's candidate pages. Documents that are clearly irrelevant (core reports, petrophysics, maps, etc.) are skipped entirely.
 
 **Collector** — Runs per candidate page using Haiku. Each page is first checked for extractable text using PyMuPDF — if the page has sufficient clean text (≥200 characters), it is sent as text directly, skipping image rendering and reducing token cost. Scanned or image-heavy pages fall back to JPEG rendering. The model extracts tagged data fragments as JSON-L with source provenance: `{page_idx, source_doc, doc_type, priority, topic, confidence, content}`. Three confidence levels are assigned: `explicit` (tabular data), `schematic` (diagram or figure), `approximate` (estimated from context).
 
-**Synthesizer** — One call per wellbore using Sonnet. Receives all fragments grouped by topic, resolves conflicts using confidence and source priority, and outputs final structured JSON with `rows` and `conflicts` arrays. Higher-confidence and higher-priority sources win conflicts.
+**Synthesizer** — One call per wellbore using Sonnet. Receives all fragments grouped by topic and emits raw observations — one per distinct data point.
 
-Documents are processed in tier order (NPD Paper → WDSS → Licensee reports). Once an anchor document provides sufficient casing structure, lower-tier documents are only used to fill gaps. 
+**Post-processing** — Documents are processed in tier order (NPD Paper → WDSS → Licensee reports). The highest-scoring anchor documents define the casing scaffold — the fixed set of casing strings for the wellbore. Lower-tier documents can only fill missing fields on existing casings, never create new rows. LOT/FIT values are matched to casing shoes by depth. Conflicts between sources are resolved by `(confidence, priority, data format)` and logged to `casing_conflicts.csv`.
 
 ## Requirements
 
