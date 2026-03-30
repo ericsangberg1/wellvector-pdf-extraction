@@ -84,8 +84,3 @@ PDFs are downloaded once and cached under `pdfs/` — subsequent runs reuse cach
 | `MAX_CONCURRENT_PDFS` | PDF download concurrency |
 | `MAX_CONCURRENT_CLAUDE` | Claude API call concurrency |
 | `SYNTH_TOKEN_LIMIT` | Max tokens before chunking Synthesizer input by topic |
-
-## Data source
-
-PDFs are downloaded from the Norwegian Sodir FactPages:
-[https://factpages.sodir.no](https://factpages.sodir.no)
