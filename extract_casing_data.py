@@ -109,6 +109,18 @@ DOC_TYPE_HINTS = {
         "Record depths and mud weights verbatim with their units."
     ),
 
+    # --- Completion log (graphical depth-track, NOT a structured WDSS table) ---
+    "COMPLETION_LOG": (
+        "This is a completion log — a graphical depth-track diagram showing the wellbore schematic, "
+        "casing strings, mud weights, and stratigraphic picks plotted against depth. "
+        "Values are read from a graph, not from a structured table.\n"
+        "Assign confidence='schematic' to ALL fragments from this document. "
+        "Extract casing depths and diameters only if the depth value is clearly annotated on the "
+        "diagram at the correct casing shoe. For mud weights/LOT values: only extract if the value "
+        "is explicitly labelled at the correct casing shoe depth on the diagram. "
+        "Do NOT infer values from curve positions alone."
+    ),
+
     # --- Casing programme sources ---
     "WELL_COMPLETION_REPORT": (
         "This is a Well Completion Report. Focus on: casing string table (diameter, shoe depth, "
@@ -129,6 +141,9 @@ DOC_TYPE_HINTS = {
         "and LOT into separate fragments.\n"
         "Include EVERY row even if some columns are blank (e.g. a casing with no hole diameter "
         "or no LOT value). Never skip a row just because it has missing fields.\n"
+        "CRITICAL: Read every cell of the LOT mud eqv. column carefully. If a numeric value is "
+        "printed in that cell, you MUST include it — do not write 'not listed' or leave it blank "
+        "if a number is visible. Only write 'not listed' if the cell is genuinely empty.\n"
         "Ignore: geological column, location data, licensee list, DST rows."
     ),
     "KONTINENTALSOKKELEN": (
@@ -1924,6 +1939,34 @@ def download_pdf(url: str, dest: Path) -> bool:
         return False
 
 
+# Thresholds for deciding whether extracted text is good enough to skip image rendering.
+# Mirrors the logic in pdfmux audit.py.
+_TEXT_GOOD_THRESHOLD  = 200  # chars — digital page, send as text
+_TEXT_EMPTY_THRESHOLD =  20  # chars — effectively empty, render as image
+
+
+def _audit_page_text(page) -> tuple[str, str]:
+    """Extract text from a fitz page and classify quality.
+
+    Returns (text, quality) where quality is:
+      'good'  — enough clean text to send directly to Haiku as text
+      'bad'   — little text but has images (scanned) — render as image
+      'empty' — no useful content — render as image
+    """
+    text = page.get_text("text")
+    text_len = len(text.strip())
+    image_count = len(page.get_images())
+
+    if text_len < _TEXT_EMPTY_THRESHOLD:
+        quality = "empty"
+    elif text_len < _TEXT_GOOD_THRESHOLD and image_count > 0:
+        quality = "bad"
+    else:
+        quality = "good"
+
+    return text, quality
+
+
 def _render_page(page, page_num: int, pdf_name: str) -> bytes | None:
     """Render a single PDF page to JPEG, trying progressively lower DPI."""
     MAX_BYTES = 5 * 1024 * 1024
@@ -1951,22 +1994,36 @@ def pdf_page_count(pdf_path: Path) -> int:
         return 0
 
 
-def pdf_to_images(pdf_path: Path, page_indices: list[int] | None = None) -> list[tuple[int, bytes]]:
-    """Render PDF pages to JPEG.
+def pdf_to_images(
+    pdf_path: Path,
+    page_indices: list[int] | None = None,
+    try_text: bool = False,
+) -> list[tuple[int, bytes | str]]:
+    """Render PDF pages to JPEG, or extract text for digital pages.
 
     Args:
         page_indices: 0-based page indices to render. None = all pages.
+        try_text: if True, attempt text extraction first. Pages with sufficient
+                  clean text (>=200 chars) are returned as str instead of JPEG bytes,
+                  saving image token costs for digital PDFs. Scanned/image-heavy pages
+                  fall back to JPEG rendering as normal.
 
-    Returns list of (page_index, jpeg_bytes) tuples.
+    Returns list of (page_index, jpeg_bytes_or_text) tuples.
     """
-    results: list[tuple[int, bytes]] = []
+    results: list[tuple[int, bytes | str]] = []
     try:
         doc = fitz.open(str(pdf_path))
         indices = page_indices if page_indices is not None else list(range(len(doc)))
         for page_num in indices:
             if page_num < 0 or page_num >= len(doc):
                 continue
-            jpeg = _render_page(doc[page_num], page_num, pdf_path.name)
+            page = doc[page_num]
+            if try_text:
+                text, quality = _audit_page_text(page)
+                if quality == "good":
+                    results.append((page_num, text))
+                    continue
+            jpeg = _render_page(page, page_num, pdf_path.name)
             if jpeg is not None:
                 results.append((page_num, jpeg))
         doc.close()
@@ -2047,7 +2104,7 @@ async def call_with_retry(client, **kwargs) -> any:
 
 async def collect_page(
     client: anthropic.AsyncAnthropic,
-    jpeg: bytes,
+    page_data: bytes | str,
     sem: asyncio.Semaphore,
     page_idx: int,
     source_doc: str,
@@ -2059,12 +2116,16 @@ async def collect_page(
 ) -> list[dict]:
     """Collector — Haiku: dump tagged fragments from one page as JSON-L.
 
+    page_data: JPEG bytes (scanned/image page) or str (digitally extracted text).
     multi_wellbore=True: instructs the LLM to extract data for ALL wellbores in the
     document and tag each fragment with the correct wellbore name. Uses a separate
     cache namespace so single- and multi-wellbore results don't collide.
     """
     global _cache_dirty
+    text_mode = isinstance(page_data, str)
     cache_suffix = "|MULTI" if multi_wellbore else ""
+    if text_mode:
+        cache_suffix += "|TEXT"
     key = _cache_key(source_doc, page_idx) + cache_suffix
     if key in _cache:
         return _cache[key]
@@ -2094,15 +2155,24 @@ async def collect_page(
             if COLLECTOR_PROVIDER == "gemini":
                 from google.genai import types as gtypes
                 model_name = MODELS["gemini"]["screener"]
-                # Gemini: combine system + user into one prompt (no caching support here)
                 full_prompt = COLLECTOR_SYSTEM + "\n\n" + user_prompt
-                contents = [
-                    gtypes.Part.from_bytes(data=jpeg, mime_type="image/jpeg"),
-                    full_prompt,
-                ]
+                if text_mode:
+                    contents = [full_prompt + "\n\nExtracted page text:\n" + page_data]
+                else:
+                    contents = [
+                        gtypes.Part.from_bytes(data=page_data, mime_type="image/jpeg"),
+                        full_prompt,
+                    ]
                 text = await call_gemini_with_retry(model_name, contents, max_output_tokens=1024)
                 latency = time.time() - start_time
             else:
+                if text_mode:
+                    user_content = [{"type": "text", "text": user_prompt + "\n\nExtracted page text:\n" + page_data}]
+                else:
+                    user_content = [
+                        {"type": "text", "text": user_prompt},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64(page_data)}},
+                    ]
                 r = await call_with_retry(
                     client,
                     model=MODELS["anthropic"]["screener"],
@@ -2112,13 +2182,7 @@ async def collect_page(
                         "text": COLLECTOR_SYSTEM,
                         "cache_control": {"type": "ephemeral"},
                     }],
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user_prompt},
-                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64(jpeg)}},
-                        ],
-                    }],
+                    messages=[{"role": "user", "content": user_content}],
                 )
                 latency = time.time() - start_time
 
@@ -2515,7 +2579,7 @@ async def process_document(
         print(f"  [{wb_label}] {doc_name}: {total_pages} pages — ToC found, "
               f"rendering {len(merged)} candidate pages")
         async with pdf_sem:
-            rendered = await asyncio.to_thread(pdf_to_images, pdf_path, merged)
+            rendered = await asyncio.to_thread(pdf_to_images, pdf_path, merged, True)
         collect_images = rendered
     elif scan_result is not None and scan_result.candidate_pages:
         # Scan identified specific pages — convert from printed (1-based) to 0-based index
@@ -2535,25 +2599,29 @@ async def process_document(
             print(f"  [{wb_label}] {doc_name}: {total_pages} pages — scan page hints, "
                   f"rendering {len(merged)} candidate pages (from {plausible})")
             async with pdf_sem:
-                rendered = await asyncio.to_thread(pdf_to_images, pdf_path, merged)
+                rendered = await asyncio.to_thread(pdf_to_images, pdf_path, merged, True)
             collect_images = rendered
         else:
             # All hints were out of range — fall back to full render
             print(f"  [{wb_label}] {doc_name}: {total_pages} pages — scan hints out of range, rendering all...")
             async with pdf_sem:
-                rendered = await asyncio.to_thread(pdf_to_images, pdf_path)
+                rendered = await asyncio.to_thread(pdf_to_images, pdf_path, None, True)
             collect_images = rendered
     else:
         print(f"  [{wb_label}] {doc_name}: {total_pages} pages — no ToC, rendering all...")
         async with pdf_sem:
-            rendered = await asyncio.to_thread(pdf_to_images, pdf_path)
+            rendered = await asyncio.to_thread(pdf_to_images, pdf_path, None, True)
         collect_images = rendered
 
     # Collector: run all pages concurrently
+    n_text  = sum(1 for _, d in collect_images if isinstance(d, str))
+    n_image = sum(1 for _, d in collect_images if isinstance(d, bytes))
+    if n_text:
+        print(f"  [{wb_label}] {doc_name}: {n_text} text-mode page(s), {n_image} image-mode page(s)")
     results = await asyncio.gather(*[
-        collect_page(client, img, claude_sem, idx, doc_name, doc_type, priority, wellbore,
+        collect_page(client, page_data, claude_sem, idx, doc_name, doc_type, priority, wellbore,
                      multi_wellbore=multi_wellbore, all_wellbores=all_wellbores)
-        for idx, img in collect_images
+        for idx, page_data in collect_images
     ])
 
     fragments = [f for page_frags in results for f in page_frags]
