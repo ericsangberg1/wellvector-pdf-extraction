@@ -511,7 +511,7 @@ Rules:
 - Return ONLY valid JSON. No prose, no markdown fences.
 
 {fragments_block}\
-"""
+""" 
 
 # ---------------------------------------------------------------------------
 # Post-processing: unit conversion, dedup, LOT→casing matching

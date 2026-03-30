@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 skills-lock.json
 CLAUDE.md
+.env
 *.pdf
 .agents/
 .claude/
