@@ -1,0 +1,15 @@
+pdfs/
+Runs/
+__pycache__/
+*.pyc
+skills-lock.json
+CLAUDE.md
+*.pdf
+.agents/
+.claude/
+.DS_Store
+.Rhistory
+Wellvector Progress.md
+lot_fit_scan.csv
+lot_fit_scanner.py
+tracking.py
