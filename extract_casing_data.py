@@ -1229,7 +1229,7 @@ class LotFitObservation:
 
 
 # Union type alias for observations (used in type annotations)
-AnyObservation = CasingObservation | LotFitObservation | DstObservation
+AnyObservation = CasingObservation | LotFitObservation
 
 
 # ---------------------------------------------------------------------------
