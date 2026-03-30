@@ -18,7 +18,7 @@ CSV filter
 
 **Universal Document Scan** — Each PDF is assessed for relevance before any data extraction runs. The scan identifies whether the document contains a casing programme or LOT/FIT tests, locates candidate data pages, and checks for a table of contents. Documents that are clearly irrelevant (core reports, petrophysics, DST-only, etc.) are skipped entirely. The scan result also provides page hints that restrict collection to only the pages likely to contain data.
 
-**Collector** — Runs per candidate page using Haiku. Each page is rendered as an image and the model extracts tagged data fragments as JSON-L with source provenance: `{page_idx, source_doc, doc_type, priority, topic, confidence, content}`. Three confidence levels are assigned: `explicit` (tabular data), `schematic` (diagram or figure), `approximate` (estimated from context).
+**Collector** — Runs per candidate page using Haiku. Each page is first checked for extractable text using PyMuPDF — if the page has sufficient clean text (≥200 characters), it is sent as text directly, skipping image rendering and reducing token cost. Scanned or image-heavy pages fall back to JPEG rendering. The model extracts tagged data fragments as JSON-L with source provenance: `{page_idx, source_doc, doc_type, priority, topic, confidence, content}`. Three confidence levels are assigned: `explicit` (tabular data), `schematic` (diagram or figure), `approximate` (estimated from context).
 
 **Synthesizer** — One call per wellbore using Sonnet. Receives all fragments grouped by topic, resolves conflicts using confidence and source priority, and outputs final structured JSON with `rows` and `conflicts` arrays. Higher-confidence and higher-priority sources win conflicts.
 
