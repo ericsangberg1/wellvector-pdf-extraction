@@ -717,11 +717,9 @@ def postprocess_observations(wellbore: str, observations: list[dict],
     - Converts all depths to metres, all mud weights to g/cm³
     - Deduplicates casing strings by type (picks best source)
     - Matches each LOT/FIT to the nearest casing shoe immediately above it
-    - Deduplicates DSTs by top depth ±5m
     """
     casing_obs  = [o for o in observations if o.get("type") == "casing"]
     lot_obs     = [o for o in observations if o.get("type") == "lot_fit"]
-    dst_obs     = [o for o in observations if o.get("type") == "dst"]
 
     conflicts: list[dict] = []
 
@@ -1014,43 +1012,6 @@ def postprocess_observations(wellbore: str, observations: list[dict],
             else:
                 entry["_lot_note"] += f"; alt={emw} from {obs.get('source_doc','')} (lower priority, kept existing)"
 
-    # -------------------------------------------------------------------- DSTs
-    dst_rows: list[dict] = []
-    for obs in dst_obs:
-        _dt = obs.get("doc_type", "")
-        top_m, _ = to_metres(obs.get("top"), obs.get("top_unit"), doc_type=_dt)
-        if top_m is None:
-            continue
-        bottom_m, _ = to_metres(obs.get("bottom"), obs.get("bottom_unit"), doc_type=_dt)
-        mw = to_gcm3(obs.get("mud_weight"), obs.get("mud_unit"))
-
-        # Dedup ±5m
-        dup = next((d for d in dst_rows if abs(d["_top_m"] - top_m) <= 5), None)
-        if dup:
-            if _obs_score(obs) > _obs_score({"confidence": dup["_confidence"], "priority": dup["_priority"]}):
-                dup.update({
-                    "_top_m":      top_m,
-                    "_bottom_m":   bottom_m,
-                    "_mw":         mw,
-                    "_dst_num":    obs.get("dst_number"),
-                    "_priority":   int(obs.get("priority", 0)),
-                    "_confidence": obs.get("confidence", "inferred"),
-                    "_source_doc": obs.get("source_doc", ""),
-                    "_doc_type":   obs.get("doc_type", ""),
-                })
-            continue
-
-        dst_rows.append({
-            "_top_m":      top_m,
-            "_bottom_m":   bottom_m,
-            "_mw":         mw,
-            "_dst_num":    obs.get("dst_number"),
-            "_priority":   int(obs.get("priority", 0)),
-            "_confidence": obs.get("confidence", "inferred"),
-            "_source_doc": obs.get("source_doc", ""),
-            "_doc_type":   obs.get("doc_type", ""),
-        })
-
     # ---------------------------------------------------- Build output rows
     rows: list[dict] = []
 
@@ -1087,8 +1048,6 @@ def postprocess_observations(wellbore: str, observations: list[dict],
             "source_priority":   entry["_priority"],
             "conflict_fields":   "",
         })
-
-    # DST rows omitted from output
 
     return rows, conflicts
 
@@ -1267,20 +1226,6 @@ class LotFitObservation:
     source_priority: int = 0
 
 
-@dataclass
-class DstObservation:
-    """DST/MDT/RFT/WFT observation. Never equate with LOT/FIT."""
-    observation_type: str = "dst_observation"
-    wellbore: str = ""
-    source_doc: str = ""
-    source_page: int | None = None
-    raw_snippet: str = ""
-    dst_number: int | None = None
-    top_m: float | None = None
-    bottom_m: float | None = None
-    mud_weight_g_cm3: float | None = None
-    source_doc_type: str = ""
-    source_priority: int = 0
 
 
 # Union type alias for observations (used in type annotations)
@@ -1850,7 +1795,7 @@ def select_scaffold_docs(
 
 # Casing size keywords used for the fragment-based completeness heuristic
 _COMPLETENESS_CASING_KW = {"30\"", "20\"", "13-3/8", "9-5/8", "7\"", "5-1/2", "18-5/8"}
-_COMPLETENESS_TEST_KW   = {"LOT", "FIT", "DST", "MDT", "RFT", "WFT"}
+_COMPLETENESS_TEST_KW   = {"LOT", "FIT"}
 
 
 def is_wellbore_complete(fragments: list[dict]) -> bool:
