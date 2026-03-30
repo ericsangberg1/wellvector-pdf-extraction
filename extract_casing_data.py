@@ -1,5 +1,5 @@
 """
-Wellbore casing & formation data extractor.
+Wellbore casing & formation data extractor. Made as a challenge for Wellvector.
 
 Pipeline:
   CSV filter (by wlbDocumentType)
