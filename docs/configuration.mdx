@@ -1,0 +1,53 @@
+---
+title: Configuration
+description: Key parameters at the top of extract_casing_data.py and what they control.
+---
+
+All configuration lives at the top of `extract_casing_data.py`. There is no separate config file.
+
+## Document filtering
+
+| Variable | Default | Description |
+|---|---|---|
+| `TARGET_DOC_TYPES` | `["REPORTED BY LICENSEE", "OLD NPD WDSS"]` | Document types to include. Values must match the `wlbDocumentType` column in the input CSV (case-insensitive). |
+| `SKIP_DOC_PATTERNS` | See source | Document name substrings that are hard-skipped without screening. Add patterns here as you discover irrelevant document types. |
+| `WELLBORE_FILTER` | `None` | Set to a wellbore name (e.g. `"7/11-3"`) to process a single wellbore. `None` processes all wellbores in the CSV. |
+
+## Document priority
+
+| Variable | Default | Description |
+|---|---|---|
+| `DOC_PRIORITY` | `{"REPORTED BY LICENSEE": 2, "OLD NPD WDSS": 1}` | Trust ranking per document type. Higher number = more trusted when conflicts arise. |
+| `DOC_TYPE_TIERS` | `["NPD PAPER", "OLD NPD WDSS", "REPORTED BY LICENSEE"]` | Processing order. Lower index = processed first. Wellbores with sufficient data are skipped in later tiers. |
+| `ANCHOR_CASING_THRESHOLD` | — | Minimum number of casing fragments from anchor documents before lower-tier documents are skipped. |
+
+## Models and concurrency
+
+| Variable | Default | Description |
+|---|---|---|
+| `PROVIDER` | `"anthropic"` | Set to `"anthropic"` or `"gemini"`. Gemini requires a `GOOGLE_API_KEY` and uses `gemini-2.0-flash` (screening) and `gemini-1.5-pro` (extraction). |
+| `MAX_CONCURRENT_PDFS` | `1` | Number of PDFs downloaded in parallel. Increase carefully — Sodir rate-limits downloads. |
+| `MAX_CONCURRENT_CLAUDE` | `2` | Number of concurrent Claude API calls. Increase if you have high rate limits. |
+| `SYNTH_TOKEN_LIMIT` | `140000` | Maximum estimated tokens before chunking the synthesizer input by topic. |
+
+## Re-synthesis
+
+| Variable | Description |
+|---|---|
+| `RESYNTH_FROM` | Set to a run folder name (e.g. `"run12"`) to skip collection and re-synthesize from that run's saved `fragments.json`. Set to `None` for a full pipeline run. |
+
+You can also pass `--resynth <run_folder>` as a CLI argument instead of editing the file.
+
+## Document-type hints
+
+`DOC_TYPE_HINTS` is a dictionary that injects focused instructions into the Haiku collector prompt based on document name substrings. For example:
+
+```python
+"WELL_COMPLETION_REPORT": (
+    "This is a Well Completion Report. Focus on: casing string table "
+    "(diameter, shoe depth, hole size, cement volume). "
+    "Ignore: mud properties, geological descriptions, core data."
+),
+```
+
+Documents not listed in `DOC_TYPE_HINTS` receive a generic prompt and are processed in full. Add entries as you encounter new document types to improve accuracy and reduce noise.

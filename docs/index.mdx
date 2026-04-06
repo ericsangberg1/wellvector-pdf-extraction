@@ -1,0 +1,42 @@
+---
+title: Wellvector
+description: Extracting structured wellbore data from decades-old scanned PDFs using a multi-stage LLM pipeline.
+---
+
+Wellvector is a pipeline that reads Norwegian oil well documents — scanned PDFs from the 1960s through the 1990s, sourced from the [Norwegian Offshore Directorate (Sodir) FactPages](https://factpages.sodir.no) — and extracts structured casing programme and formation test data from them.
+
+The documents are messy: handwritten tables, inconsistent units, multiple conflicting sources per well. Wellvector resolves these conflicts deterministically and outputs clean, auditable CSV files.
+
+## What it produces
+
+For each wellbore, Wellvector outputs:
+
+- **Casing strings** — type, diameter, shoe depth, hole size
+- **LOT/FIT values** — leak-off and formation integrity test results matched to casing shoes
+- **DST records** — drill stem test intervals with mud weight and test type
+
+All output rows include the source document, confidence level, and a plain-English conflict log explaining every decision made.
+
+## How it works
+
+The pipeline uses two Claude models in sequence:
+
+1. **Claude Haiku** screens each PDF page for relevance and extracts tagged data fragments
+2. **Claude Sonnet** synthesizes all fragments for a wellbore into a single coherent output
+
+Python post-processing handles conflict resolution using deterministic priority rules — no model is trusted to make the final call on conflicting data.
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run the pipeline on your first wellbore
+  </Card>
+  <Card title="Pipeline architecture" icon="diagram-project" href="/pipeline">
+    How the five-phase pipeline works
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration">
+    Key parameters and what they control
+  </Card>
+  <Card title="Output format" icon="table" href="/output">
+    What the CSV columns mean
+  </Card>
+</CardGroup>

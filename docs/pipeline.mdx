@@ -1,0 +1,108 @@
+---
+title: Pipeline architecture
+description: How Wellvector turns scanned oil well PDFs into structured data across five processing phases.
+---
+
+Everything lives in a single async Python file (`extract_casing_data.py`). The pipeline processes documents concurrently using `asyncio`, with separate semaphores controlling PDF download and Claude API concurrency.
+
+## Overview
+
+```
+CSV filter
+  → PDF download (async)
+    → Phase 0 — Universal scan (Haiku)
+      → Scaffold selection
+        → Collection (Haiku, per page)
+          → Synthesis (Sonnet, per wellbore)
+            → Post-processing (Python)
+              → casing_data.csv + casing_conflicts.csv
+```
+
+## Phase 0 — Universal document scan
+
+Before downloading any pages, Haiku screens the first 1–4 pages of each PDF for relevance. The scan returns:
+
+| Field | Description |
+|---|---|
+| `relevant` | Whether the document contains casing or test data |
+| `as_built` | `planned`, `as_built`, or `unclear` |
+| `casing_table` | `none`, `partial`, or `full` |
+| `has_lot_fit` | Whether LOT/FIT values are present |
+| `has_dst` | Whether DST records are present |
+| `wellbores` | List of wellbore names found in the document |
+| `candidate_pages` | Page hints to focus the collector |
+
+Documents flagged as irrelevant (geochemistry, petrophysics, mud reports, etc.) are skipped entirely. This avoids unnecessary API calls and keeps costs down.
+
+## Scaffold selection
+
+For each wellbore, Wellvector selects the best 1–2 **anchor documents** based on scan score. As-built documents with full casing tables rank highest.
+
+Anchor documents define the casing row structure. All other documents can only **fill missing fields** in existing rows — they cannot create new casing strings. This prevents low-quality sources from inflating the output.
+
+## Collection phase
+
+Each candidate page is rendered as an image by PyMuPDF and sent to Haiku with a document-type-aware prompt. Haiku extracts **tagged fragments** as JSON-L:
+
+```json
+{
+  "page_idx": 4,
+  "source_doc": "149_7_11_1_WELL_COMPLETION_REPORT",
+  "doc_type": "REPORTED BY LICENSEE",
+  "priority": 2,
+  "topic": "casing_data",
+  "confidence": "explicit",
+  "content": "13 3/8\" casing set at 496 m RKB in 17.5\" hole"
+}
+```
+
+Three confidence levels are used:
+
+| Level | Source |
+|---|---|
+| `explicit` | Data read directly from a table |
+| `schematic` | Inferred from a diagram or wellbore schematic |
+| `approximate` | Estimated from narrative text |
+
+Only `explicit` LOT/FIT values are accepted — non-explicit formation test fragments are dropped before synthesis.
+
+### Fragment cache
+
+Fragments are cached at `pdfs/fragment_cache.json`, keyed by `{doc_name}|{page_idx}|{prompt_hash}`. The cache is automatically invalidated when the collector prompt changes, so re-runs on already-collected documents are free.
+
+## Synthesis phase
+
+One Sonnet call is made per wellbore. Sonnet receives all fragments grouped by topic and outputs raw observations — casing strings, LOT/FIT values, DST records.
+
+Sonnet's job is to read and reason across sources, not to make the final call on conflicts. That is handled deterministically in Python.
+
+If a wellbore's fragments exceed `SYNTH_TOKEN_LIMIT` (default 140,000 tokens), topics are chunked into separate Sonnet calls and merged after.
+
+## Post-processing
+
+Python applies deterministic rules to merge observations into final rows:
+
+**Casing rows**
+- The scaffold (anchor doc) creates the row structure
+- Lower-priority documents fill missing fields only
+- Conflicts are resolved by `(confidence_rank, priority, data_format_rank)`
+
+**LOT/FIT**
+- Matched to casing rows by shoe depth (±50 m tolerance)
+- Conflicts resolved by the same scoring function
+
+**DST records**
+- Deduplicated by depth ±5 m
+- Each record retains its source document and mud weight
+
+All conflicts are logged to `casing_conflicts.csv` with both values, their sources, and the resolution reason.
+
+## Tier processing order
+
+Documents are processed in tiers by type:
+
+```
+NPD PAPER → OLD NPD WDSS → REPORTED BY LICENSEE
+```
+
+After each tier, wellbores with sufficient data are marked complete and skipped in lower tiers. This prioritises authoritative licensee-reported data while still using NPD summaries as fallbacks.

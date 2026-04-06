@@ -73,6 +73,11 @@ MULTI_WELLBORE_DOC_TYPES = {"NPD PAPER"}
 ANCHOR_CASING_THRESHOLD = 3
 ANCHOR_TEST_THRESHOLD   = 1
 
+# After this many relevant documents have been processed for a wellbore without
+# ever finding a data type, that type is marked "confirmed absent" and collection
+# stops looking for it.
+ABSENCE_DOC_THRESHOLD = 3
+
 # Document name substrings that are never relevant — skip before downloading.
 # Add to this list as you discover more noise documents.
 # Hard-skip patterns — these are never relevant, skip without even screening.
@@ -285,6 +290,10 @@ SINGLE_DOC_URL: str | None = None
 
 # Synthesizer context window limit (estimated tokens).
 # If a wellbore's fragments exceed this, topics are chunked into separate Sonnet calls.
+# Max pages to render when no ToC or scan guidance is available.
+# Prevents full renders on 100+ page documents when the data is always in the first N pages.
+RENDER_ALL_PAGE_CAP = 25
+
 SYNTH_TOKEN_LIMIT = 140_000
 
 # Pricing per million tokens (USD) — update if Anthropic changes rates
@@ -1591,8 +1600,10 @@ async def scan_document_universal(
     pdf_sem: "asyncio.Semaphore",
     claude_sem: "asyncio.Semaphore",
 ) -> DocumentScanResult:
-    """Phase 0 per document: download (if needed), render first 2 pages, classify.
+    """Phase 0 per document: download (if needed), render first 5 pages, classify.
 
+    Scanning pages 0-4 in a single call avoids the previous two-round-trip
+    escalation pattern (pages 0-1 → uncertain → pages 2-5).
     Returns a DocumentScanResult. Cached across runs.
     """
     doc_name = doc["wlbDocumentName"]
@@ -1617,7 +1628,8 @@ async def scan_document_universal(
                 summary="download failed",
             )
         total_pages = await asyncio.to_thread(pdf_page_count, pdf_path)
-        rendered = await asyncio.to_thread(pdf_to_images, pdf_path, [0, 1])
+        scan_indices = list(range(min(5, total_pages)))
+        rendered = await asyncio.to_thread(pdf_to_images, pdf_path, scan_indices)
 
     if not rendered:
         return DocumentScanResult(
@@ -1656,17 +1668,8 @@ async def scan_document_universal(
                        "SUMMARY: scan error")
         return raw, _parse_scan_response(raw, doc_name, doc_type, wellbore, is_escalation)
 
-    # Pass 1: first 2 pages
+    # Single scan call covering pages 0-4
     _, result = await _run_scan_call([jpeg for _, jpeg in rendered])
-
-    # Escalation: if uncertain, scan pages 2–5 to look past cover/ToC
-    if result.relevance_class == "uncertain_needs_escalation" and total_pages > 2:
-        escalation_indices = list(range(2, min(6, total_pages)))
-        print(f"    [scan] {doc_name}: uncertain on p0-1 — escalating to p{escalation_indices[0]}-{escalation_indices[-1]}")
-        async with pdf_sem:
-            extra_rendered = await asyncio.to_thread(pdf_to_images, pdf_path, escalation_indices)
-        if extra_rendered:
-            _, result = await _run_scan_call([jpeg for _, jpeg in extra_rendered], is_escalation=True)
 
     # Cache the final result
     global _cache_dirty
@@ -1795,11 +1798,12 @@ _COMPLETENESS_CASING_KW = {"30\"", "20\"", "13-3/8", "9-5/8", "7\"", "5-1/2", "1
 _COMPLETENESS_TEST_KW   = {"LOT", "FIT"}
 
 
-def is_wellbore_complete(fragments: list[dict]) -> bool:
+def is_wellbore_complete(fragments: list[dict], absence: dict | None = None) -> bool:
     """Heuristic completeness check based on fragment content — no LLM cost.
 
     Returns True if fragments contain evidence for at least ANCHOR_CASING_THRESHOLD
-    distinct casing sizes AND ANCHOR_TEST_THRESHOLD formation test mentions.
+    distinct casing sizes AND ANCHOR_TEST_THRESHOLD formation test mentions,
+    OR if the missing type is confirmed absent in the absence map.
     """
     casing_frags = [f for f in fragments if f.get("topic") == "casing_data"]
     test_frags   = [f for f in fragments if f.get("topic") == "formation_tests"]
@@ -1817,6 +1821,14 @@ def is_wellbore_complete(fragments: list[dict]) -> bool:
         for kw in _COMPLETENESS_TEST_KW:
             if kw in content:
                 tests_seen.add(kw)
+
+    # Treat confirmed-absent types as satisfied so we stop searching
+    if absence:
+        if absence.get("lot_absent"):
+            tests_seen.add("LOT")
+        if absence.get("casing_absent"):
+            while len(sizes_seen) < ANCHOR_CASING_THRESHOLD:
+                sizes_seen.add(f"_absent_{len(sizes_seen)}")
 
     return (len(sizes_seen) >= ANCHOR_CASING_THRESHOLD
             and len(tests_seen) >= ANCHOR_TEST_THRESHOLD)
@@ -1855,18 +1867,104 @@ def build_known_state(fragments_by_wb: dict[str, list[dict]]) -> dict[str, dict]
     return state
 
 
-def missing_data_description(known: dict) -> str | None:
+def missing_data_description(known: dict, absence: dict | None = None) -> str | None:
     """Return a short description of what data types are still missing for a wellbore.
-    Returns None if everything is known (should skip).
+    Confirmed-absent data types are treated as satisfied.
+    Returns None if everything is known or confirmed absent (should skip).
     """
     missing = []
-    if not known["has_casing"]:
+    casing_absent = absence and absence.get("casing_absent")
+    lot_absent    = absence and absence.get("lot_absent")
+    if not known["has_casing"] and not casing_absent:
         missing.append("casing setting depths, casing diameters, hole sizes")
-    if not known["has_tests"]:
+    if not known["has_tests"] and not lot_absent:
         missing.append("formation pressure tests (LOT, FIT, leak-off, shoe test)")
     if not missing:
-        return None  # everything known — skip this doc
+        return None  # everything known or confirmed absent — skip this doc
     return "; ".join(missing)
+
+
+# Patterns in explicit casing_data fragment content that positively signal a missing
+# LOT/FIT value — the table row exists but the cell is blank or explicitly empty.
+_LOT_ABSENT_PATTERNS = {"not listed", "no lot", "no fit", "not recorded", "not available",
+                        "none", "n/a", "—", "-"}
+
+
+def update_absence_map(
+    absence_map: dict,
+    wellbore: str,
+    all_frags_for_wb: list[dict],
+    docs_checked: int,
+) -> None:
+    """Mark data types as confirmed absent.
+
+    Two detection modes (both operate in-place on absence_map):
+
+    1. Positive signal (fragment-level): an explicit casing_data fragment contains a
+       phrase like "not listed" or "n/a" in the LOT field — i.e. the table row exists
+       but the cell is blank. Two such fragments across documents is enough.
+
+    2. Weak signal (threshold-based): N documents processed without finding any explicit
+       formation_test fragments at all. Uses ABSENCE_DOC_THRESHOLD.
+    """
+    state = absence_map.setdefault(wellbore, {
+        "lot_absent":    False,
+        "casing_absent": False,
+        "docs_checked":  0,
+    })
+    state["docs_checked"] = docs_checked
+
+    if not state["lot_absent"]:
+        # Positive signal: count explicit casing rows where LOT is explicitly blank/absent
+        explicit_lot_absent = sum(
+            1 for f in all_frags_for_wb
+            if f.get("topic") == "casing_data" and f.get("confidence") == "explicit"
+            and any(p in f.get("content", "").lower() for p in _LOT_ABSENT_PATTERNS)
+        )
+        if explicit_lot_absent >= 2:
+            state["lot_absent"] = True
+            print(f"  [{wellbore}] absence (explicit): LOT/FIT blank in {explicit_lot_absent} "
+                  f"table rows — confirmed absent")
+
+    if docs_checked < ABSENCE_DOC_THRESHOLD:
+        return
+
+    # Weak signal: no explicit data found after N docs
+    has_explicit_casing = any(
+        f.get("confidence") == "explicit" and f.get("topic") == "casing_data"
+        for f in all_frags_for_wb
+    )
+    has_explicit_tests = any(
+        f.get("confidence") == "explicit" and f.get("topic") == "formation_tests"
+        for f in all_frags_for_wb
+    )
+
+    if not has_explicit_tests and not state["lot_absent"]:
+        state["lot_absent"] = True
+        print(f"  [{wellbore}] absence (threshold): LOT/FIT not found in {docs_checked} docs")
+    if not has_explicit_casing and not state["casing_absent"]:
+        state["casing_absent"] = True
+        print(f"  [{wellbore}] absence (threshold): casing data not found in {docs_checked} docs")
+
+
+def build_known_summary(known: dict | None, absence: dict | None = None) -> str | None:
+    """Build a short hint for the collector about what's already confirmed.
+
+    Passed into the collector prompt so Haiku focuses on gaps only.
+    Not included in the cache key — only affects uncached pages.
+    """
+    parts = []
+    if known:
+        if known.get("has_casing"):
+            parts.append(f"casing geometry ({known['casing_count']} strings already confirmed)")
+        if known.get("has_tests"):
+            parts.append("LOT/FIT test values already confirmed")
+    if absence:
+        if absence.get("lot_absent"):
+            parts.append("LOT/FIT: CONFIRMED ABSENT in all processed documents — do not extract")
+        if absence.get("casing_absent"):
+            parts.append("casing data: CONFIRMED ABSENT in all processed documents — do not extract")
+    return "; ".join(parts) if parts else None
 
 
 def download_pdf(url: str, dest: Path) -> bool:
@@ -2056,6 +2154,7 @@ async def collect_page(
     wellbore: str,
     multi_wellbore: bool = False,
     all_wellbores: list[str] | None = None,
+    known_summary: str | None = None,
 ) -> list[dict]:
     """Collector — Haiku: dump tagged fragments from one page as JSON-L.
 
@@ -2063,6 +2162,9 @@ async def collect_page(
     multi_wellbore=True: instructs the LLM to extract data for ALL wellbores in the
     document and tag each fragment with the correct wellbore name. Uses a separate
     cache namespace so single- and multi-wellbore results don't collide.
+    known_summary: short description of what's already confirmed from higher-tier docs.
+    Appended to the user prompt to focus Haiku on gaps. NOT included in cache key —
+    only affects uncached pages; cached pages return stored results regardless.
     """
     global _cache_dirty
     text_mode = isinstance(page_data, str)
@@ -2074,6 +2176,11 @@ async def collect_page(
         return _cache[key]
 
     hint = doc_type_hint(source_doc)
+    known_hint = (
+        f"\n\nAlready confirmed from higher-priority sources: {known_summary}\n"
+        "Focus on filling gaps only. Skip re-extracting what is already confirmed above."
+    ) if known_summary else ""
+
     if multi_wellbore and all_wellbores:
         user_prompt = COLLECTOR_USER_TEMPLATE_MULTI.format(
             source_doc=source_doc,
@@ -2082,7 +2189,7 @@ async def collect_page(
             priority=priority,
             wellbores_list=", ".join(all_wellbores),
             doc_hint=f"Document focus: {hint}" if hint else "",
-        )
+        ) + known_hint
     else:
         user_prompt = COLLECTOR_USER_TEMPLATE.format(
             source_doc=source_doc,
@@ -2091,7 +2198,7 @@ async def collect_page(
             priority=priority,
             wellbore=wellbore,
             doc_hint=f"Document focus: {hint}" if hint else "",
-        )
+        ) + known_hint
     async with sem:
         try:
             start_time = time.time()
@@ -2308,7 +2415,7 @@ async def _synth_call(
 
 
 async def screen_document(
-    client: anthropic.AsyncAnthropic, screen_images: list[bytes], sem: asyncio.Semaphore,
+    client: anthropic.AsyncAnthropic, screen_images: list[bytes | str], sem: asyncio.Semaphore,
     doc_name: str, total_pages: int,
     missing_types: str | None = None,
 ) -> tuple[bool, list[int] | None]:
@@ -2352,8 +2459,11 @@ async def screen_document(
     async with sem:
         try:
             content: list[dict] = []
-            for jpeg in check_images:
-                content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64(jpeg)}})
+            for page_data in check_images:
+                if isinstance(page_data, str):
+                    content.append({"type": "text", "text": page_data})
+                else:
+                    content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64(page_data)}})
             content.append({"type": "text", "text": prompt})
             r = await call_with_retry(
                 client,
@@ -2435,6 +2545,7 @@ async def process_document(
     missing_types: str | None = None,
     scan_result: "DocumentScanResult | None" = None,
     collection_strategy: str | None = None,
+    known_summary: str | None = None,
 ) -> list[dict]:
     """Download PDF, run Pass 0 (ToC), then Collector on candidate pages.
 
@@ -2445,6 +2556,7 @@ async def process_document(
         When scan says relevant but screen says not, scan wins (the screen only
         sees the first few pages and can miss data on later pages).
     collection_strategy: STRATEGY_* code from determine_collection_strategy().
+    known_summary: passed to collect_page to focus Haiku on gaps only.
     Returns a list of tagged fragments (not final rows).
     """
     wellbore  = doc["wlbName"]
@@ -2460,20 +2572,39 @@ async def process_document(
         if not ok:
             return []
         total_pages = await asyncio.to_thread(pdf_page_count, pdf_path)
-        # Render only first 8 pages for screening
-        screen_rendered = await asyncio.to_thread(pdf_to_images, pdf_path, list(range(min(8, total_pages))))
 
     if total_pages == 0:
         return []
 
-    screen_jpegs = [jpeg for _, jpeg in screen_rendered]
-
-    # Screen: relevance check + ToC detection in one call
-    screen_relevant, toc_indices = await screen_document(client, screen_jpegs, claude_sem, doc_name,
-                                                         total_pages=total_pages,
-                                                         missing_types=missing_types)
-
     wb_label = "MULTI" if multi_wellbore else wellbore
+
+    # --- Screen phase: skip render when result is cached or scan gives confident guidance ---
+    cache_suffix_prog = f"|PROG:{missing_types}" if missing_types else ""
+    screen_cache_key  = f"SCREEN|{doc_name}|{_prompt_hash()}{cache_suffix_prog}"
+    use_scan_guidance = (
+        scan_result is not None
+        and scan_result.relevance_class == "relevant"
+        and bool(scan_result.candidate_pages)
+    )
+
+    if screen_cache_key in _cache:
+        cached_screen   = _cache[screen_cache_key]
+        screen_relevant = cached_screen.get("relevant", True)
+        toc_indices     = cached_screen.get("pages")
+    elif use_scan_guidance:
+        # Scan already gave confident relevance + specific page hints — skip screen render
+        screen_relevant = True
+        toc_indices     = None
+    else:
+        async with pdf_sem:
+            screen_rendered = await asyncio.to_thread(
+                pdf_to_images, pdf_path, list(range(min(8, total_pages))), True
+            )
+        screen_data = [data for _, data in screen_rendered]
+        screen_relevant, toc_indices = await screen_document(
+            client, screen_data, claude_sem, doc_name,
+            total_pages=total_pages, missing_types=missing_types,
+        )
 
     # --- Routing decision: scan_result is the authoritative relevance source ---
     # The screen call only sees the first ~8 pages — cover pages, ToC, and front matter
@@ -2482,29 +2613,26 @@ async def process_document(
     # Rule: when scan_result is available, its relevance judgement overrides the screen.
     # The screen's ToC page list is always kept regardless.
     if scan_result is not None:
-        scan_status = scan_result.relevance_class  # "relevant"|"irrelevant"|"uncertain_needs_escalation"
-        scan_says_relevant = scan_result.relevance_class == "relevant"  # only confident relevant overrides
+        scan_status        = scan_result.relevance_class
+        scan_says_relevant = scan_result.relevance_class == "relevant"
 
         if screen_relevant and scan_result.relevant:
-            final_relevant = True
+            final_relevant  = True
             decision_source = "screen_and_scan_agree_relevant"
         elif scan_says_relevant and not screen_relevant:
-            # Only a confident "relevant" scan overrides a NOT_RELEVANT screen
             print(f"  [{wb_label}] {doc_name}: scan={scan_status} screen=NOT_RELEVANT "
                   f"→ scan overrides screen, proceeding with collection")
-            final_relevant = True
+            final_relevant  = True
             decision_source = "scan_overrides_screen"
         elif screen_relevant and not scan_says_relevant:
-            # Screen says relevant but scan says irrelevant — scan wins (it had more context)
-            final_relevant = False
+            final_relevant  = False
             decision_source = "scan_overrides_screen_as_irrelevant"
         else:
-            final_relevant = False
+            final_relevant  = False
             decision_source = "screen_and_scan_agree_irrelevant"
     else:
-        # No scan result available — fall back to screen alone
-        final_relevant = screen_relevant
-        scan_status = "N/A"
+        final_relevant  = screen_relevant
+        scan_status     = "N/A"
         decision_source = "screen_only"
 
     if not final_relevant:
@@ -2516,58 +2644,78 @@ async def process_document(
               f" | reason={reason}")
         return []
 
+    # --- Page selection for collection ---
+    cache_suffix_col = "|MULTI" if multi_wellbore else ""
+
     if toc_indices is not None:
-        # Only render the candidate pages (not the whole PDF)
-        merged = sorted(toc_indices)
+        candidate_indices = sorted(toc_indices)
         print(f"  [{wb_label}] {doc_name}: {total_pages} pages — ToC found, "
-              f"rendering {len(merged)} candidate pages")
-        async with pdf_sem:
-            rendered = await asyncio.to_thread(pdf_to_images, pdf_path, merged, True)
-        collect_images = rendered
+              f"collecting {len(candidate_indices)} candidate pages")
     elif scan_result is not None and scan_result.candidate_pages:
         # Scan identified specific pages — convert from printed (1-based) to 0-based index
         # with ±2 buffer, clamped to document length.
         # Discard page hints that are implausibly large (reference numbers, not page numbers).
         plausible = [p for p in scan_result.candidate_pages if p <= total_pages + 10]
         if plausible:
-            raw_indices = [p - 1 for p in plausible]  # printed→0-based
-            buffered = set()
+            raw_indices = [p - 1 for p in plausible]
+            buffered: set[int] = set()
             for idx in raw_indices:
                 for offset in range(-2, 3):
                     buffered.add(idx + offset)
-            merged = sorted(i for i in buffered if 0 <= i < total_pages)
+            candidate_indices = sorted(i for i in buffered if 0 <= i < total_pages)
         else:
-            merged = []
-        if merged:
+            candidate_indices = []
+        if candidate_indices:
             print(f"  [{wb_label}] {doc_name}: {total_pages} pages — scan page hints, "
-                  f"rendering {len(merged)} candidate pages (from {plausible})")
-            async with pdf_sem:
-                rendered = await asyncio.to_thread(pdf_to_images, pdf_path, merged, True)
-            collect_images = rendered
+                  f"collecting {len(candidate_indices)} candidate pages (from {plausible})")
         else:
-            # All hints were out of range — fall back to full render
-            print(f"  [{wb_label}] {doc_name}: {total_pages} pages — scan hints out of range, rendering all...")
-            async with pdf_sem:
-                rendered = await asyncio.to_thread(pdf_to_images, pdf_path, None, True)
-            collect_images = rendered
+            candidate_indices = list(range(min(total_pages, RENDER_ALL_PAGE_CAP)))
+            print(f"  [{wb_label}] {doc_name}: {total_pages} pages — scan hints out of range, "
+                  f"collecting up to {len(candidate_indices)} pages (cap={RENDER_ALL_PAGE_CAP})")
     else:
-        print(f"  [{wb_label}] {doc_name}: {total_pages} pages — no ToC, rendering all...")
-        async with pdf_sem:
-            rendered = await asyncio.to_thread(pdf_to_images, pdf_path, None, True)
-        collect_images = rendered
+        candidate_indices = list(range(min(total_pages, RENDER_ALL_PAGE_CAP)))
+        print(f"  [{wb_label}] {doc_name}: {total_pages} pages — no ToC, "
+              f"collecting up to {len(candidate_indices)} pages (cap={RENDER_ALL_PAGE_CAP})")
 
-    # Collector: run all pages concurrently
+    # --- Cache-aware rendering: skip pages already in fragment cache ---
+    cached_frags:    dict[int, list[dict]] = {}
+    pages_to_render: list[int] = []
+    for page_idx in candidate_indices:
+        base_key = _cache_key(doc_name, page_idx) + cache_suffix_col
+        if base_key in _cache:
+            cached_frags[page_idx] = _cache[base_key]
+        elif (base_key + "|TEXT") in _cache:
+            cached_frags[page_idx] = _cache[base_key + "|TEXT"]
+        else:
+            pages_to_render.append(page_idx)
+
+    if cached_frags:
+        print(f"  [{wb_label}] {doc_name}: {len(cached_frags)} page(s) from cache, "
+              f"{len(pages_to_render)} to render")
+
+    collect_images: list[tuple[int, bytes | str]] = []
+    if pages_to_render:
+        async with pdf_sem:
+            collect_images = await asyncio.to_thread(
+                pdf_to_images, pdf_path, pages_to_render, True
+            )
+
     n_text  = sum(1 for _, d in collect_images if isinstance(d, str))
     n_image = sum(1 for _, d in collect_images if isinstance(d, bytes))
     if n_text:
         print(f"  [{wb_label}] {doc_name}: {n_text} text-mode page(s), {n_image} image-mode page(s)")
-    results = await asyncio.gather(*[
+
+    # Collector: run all non-cached pages concurrently
+    new_results = await asyncio.gather(*[
         collect_page(client, page_data, claude_sem, idx, doc_name, doc_type, priority, wellbore,
-                     multi_wellbore=multi_wellbore, all_wellbores=all_wellbores)
+                     multi_wellbore=multi_wellbore, all_wellbores=all_wellbores,
+                     known_summary=known_summary)
         for idx, page_data in collect_images
     ])
 
-    fragments = [f for page_frags in results for f in page_frags]
+    fragments = [f for page_frags in new_results for f in page_frags]
+    for frags in cached_frags.values():
+        fragments.extend(frags)
 
     # Drop formation_tests fragments that aren't from an explicit table source.
     # Schematic and approximate readings are not confirmed test records.
@@ -2844,6 +2992,31 @@ async def main():
         for wb, sel in sorted(scaffold_selection.items()):
             print(f"  [{wb}] {sel.reason}")
 
+        # Pre-populate absence map from scan results.
+        # If a document has a full or partial casing table but has_lot_fit=False,
+        # that is a direct positive signal: the table exists but the LOT column is absent.
+        # The primary scaffold doc (highest-ranked) is authoritative; one is enough.
+        # For non-scaffold docs, require 2 such docs to reduce false-positive risk.
+        for wb, sel in scaffold_selection.items():
+            lot_absent_docs = []
+            for doc_name in sel.ranked_docs:
+                r = scan_results.get(doc_name)
+                if r and r.relevant and r.casing_table in ("full", "partial") and not r.has_lot_fit:
+                    lot_absent_docs.append(doc_name)
+            if not lot_absent_docs:
+                continue
+            # Primary scaffold doc saying "no LOT" is conclusive on its own
+            primary_is_absent = sel.primary_doc in [d for d in lot_absent_docs]
+            threshold = 1 if primary_is_absent else 2
+            if len(lot_absent_docs) >= threshold:
+                state = absence_map.setdefault(wb, {
+                    "lot_absent": False, "casing_absent": False, "docs_checked": 0,
+                })
+                if not state["lot_absent"]:
+                    state["lot_absent"] = True
+                    print(f"  [{wb}] absence (scan): LOT/FIT pre-marked absent — "
+                          f"{len(lot_absent_docs)} doc(s) have casing table but no LOT column")
+
         # Save scan debug artifact
         scan_artifact = {
             "scan_results": {k: asdict(v) for k, v in scan_results.items()},
@@ -2888,6 +3061,9 @@ async def main():
             return unique
 
         docs_processed = 0
+        docs_per_wellbore: dict[str, int] = defaultdict(int)  # total relevant docs processed per wb
+        absence_map: dict[str, dict] = {}  # confirmed-absent data types per wellbore
+
         for tier_idx in sorted(tiers_map.keys()):
             tier_docs = tiers_map[tier_idx]
             tier_name = DOC_TYPE_TIERS[tier_idx] if tier_idx < len(DOC_TYPE_TIERS) else "OTHER"
@@ -2906,13 +3082,16 @@ async def main():
                 print(f"\n--- {tier_name} tier: skipped (all wellbores complete) ---")
                 continue
 
-            # --- Progressive collection: build known state for non-first tiers ---
+            # --- Progressive collection: build known state and absence map for non-first tiers ---
             known_state: dict[str, dict] = {}
             if tier_idx > 0 and not is_multi_tier:
                 known_state = build_known_state(dict(all_fragments))
                 progressive_count = sum(1 for d in tier_docs
                                         if d["wlbName"] in known_state
-                                        and missing_data_description(known_state[d["wlbName"]]) is not None)
+                                        and missing_data_description(
+                                            known_state[d["wlbName"]],
+                                            absence_map.get(d["wlbName"]),
+                                        ) is not None)
                 print(f"\n--- {tier_name} tier: {len(tier_docs)} documents "
                       f"({len(active_wellbores)} active wellbores"
                       + (f", {len(tier_docs) - progressive_count} with progressive narrowing" if progressive_count < len(tier_docs) else "")
@@ -2924,13 +3103,18 @@ async def main():
             tasks = []
             for doc in tier_docs:
                 mt = None
+                ks = None
                 if known_state and not is_multi_tier:
                     wb_known = known_state.get(doc["wlbName"])
                     if wb_known:
-                        mt = missing_data_description(wb_known)
-                        # mt is None if everything is known — but completeness
-                        # check already removed fully-complete wellbores, so
-                        # this handles the partial case (e.g. has casing but no tests)
+                        wb_absence = absence_map.get(doc["wlbName"])
+                        mt = missing_data_description(wb_known, wb_absence)
+                        ks = build_known_summary(wb_known, wb_absence)
+                        # Skip entirely if nothing left to collect (all known or confirmed absent)
+                        if mt is None:
+                            print(f"  [{doc['wlbName']}] {doc['wlbDocumentName']}: "
+                                  f"skipped — nothing missing (all known or confirmed absent)")
+                            continue
                 # Look up pre-computed scan result so collection routing is authoritative
                 doc_scan = scan_results.get(doc["wlbDocumentName"])
                 doc_ref  = DocumentRef(
@@ -2952,6 +3136,7 @@ async def main():
                         missing_types=mt,
                         scan_result=doc_scan,
                         collection_strategy=strategy,
+                        known_summary=ks,
                     )
                 )
 
@@ -2970,12 +3155,23 @@ async def main():
                 docs_processed += 1
                 print(f"Progress: {i}/{docs_in_tier} in tier, {docs_processed} total\n")
 
+            # Update per-wellbore doc counts and absence map after tier completes
+            if not is_multi_tier:
+                for doc in tier_docs:
+                    docs_per_wellbore[doc["wlbName"]] += 1
+                for wb in active_wellbores:
+                    update_absence_map(
+                        absence_map, wb,
+                        all_fragments.get(wb, []),
+                        docs_per_wellbore[wb],
+                    )
+
             # --- Completeness check after each non-final tier ---
             if tier_idx < max(tiers_map.keys()):
                 newly_complete: list[str] = []
                 for wb in list(active_wellbores):
                     frags = all_fragments.get(wb, [])
-                    if is_wellbore_complete(frags):
+                    if is_wellbore_complete(frags, absence_map.get(wb)):
                         newly_complete.append(wb)
                         active_wellbores.discard(wb)
                 if newly_complete:

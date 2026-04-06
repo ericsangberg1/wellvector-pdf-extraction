@@ -1,0 +1,72 @@
+---
+title: Quickstart
+description: Run Wellvector on your first wellbore in a few minutes.
+---
+
+## Prerequisites
+
+- Python 3.11+ with `conda` installed
+- An Anthropic API key
+
+## Setup
+
+**1. Create and activate the environment**
+
+```bash
+conda create -n wellvector_env python=3.11
+conda activate wellvector_env
+pip install anthropic pymupdf requests
+```
+
+**2. Set your API key**
+
+```bash
+export ANTHROPIC_API_KEY=your_key_here
+```
+
+**3. Get a document CSV from Sodir**
+
+Wellvector reads a CSV of document metadata from the [Sodir FactPages API](https://factpages.sodir.no). The CSV must include at minimum: `wlbName`, `wlbDocumentType`, and a URL column pointing to the PDF.
+
+A sample CSV for wellbore block 7/11 is included as `wellbore_document_7_11.csv`.
+
+## Running the pipeline
+
+**Process all documents for a single wellbore:**
+
+```bash
+python extract_casing_data.py --csv wellbore_document_7_11.csv --wellbore 7/11-7
+```
+
+**Process a single PDF by URL:**
+
+```bash
+python extract_casing_data.py --url https://factpages.sodir.no/pbl/wdss_old/57_01_WDSS_General_Information.pdf
+```
+
+**Re-synthesize from a previous run without re-collecting:**
+
+```bash
+python extract_casing_data.py --resynth run74
+```
+
+The `--resynth` flag is useful when you want to change synthesis behaviour without paying to re-run the collection phase.
+
+## Output
+
+Each run creates a new folder under `Runs/`:
+
+```
+Runs/run1/
+├── casing_data.csv          # Clean output
+├── casing_data_full.csv     # Output with provenance columns
+├── casing_conflicts.csv     # Conflict log
+├── run_info.json            # Config snapshot and cost summary
+└── fragments.json           # Raw collected fragments
+```
+
+A typical run on a single wellbore with two or three source documents costs around $0.15–0.25 using Claude Sonnet for synthesis and Haiku for collection.
+
+<Tip>
+  PDFs are cached under `pdfs/` and reused across runs. Fragment extraction results are also cached per page, so re-running the same documents is fast and cheap.
+</Tip>

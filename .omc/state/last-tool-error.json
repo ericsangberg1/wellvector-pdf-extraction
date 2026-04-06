@@ -1,0 +1,7 @@
+{
+  "tool_name": "Grep",
+  "tool_input_preview": "{\"pattern\":\"def _cache_key|def pdf_to_images\",\"path\":\"/Users/ericsangberg/Wellvector/extract_casing_data.py\",\"output_mode\":\"content\"}",
+  "error": "ENOENT: no such file or directory, posix_spawn 'rg'",
+  "timestamp": "2026-04-06T19:50:35.451Z",
+  "retry_count": 1
+}

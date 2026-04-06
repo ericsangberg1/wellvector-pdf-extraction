@@ -1,0 +1,100 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1775505019172,
+  "projectRoot": "/Users/ericsangberg/Wellvector",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Python",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "requirements.txt"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "pip",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "Runs": {
+      "path": "Runs",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1775505019164,
+      "keyFiles": []
+    },
+    "__pycache__": {
+      "path": "__pycache__",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1775505019164,
+      "keyFiles": [
+        "extract_casing_data.cpython-312.pyc",
+        "extract_casing_data.cpython-314.pyc",
+        "tracking.cpython-314.pyc"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 13,
+      "lastAccessed": 1775505019165,
+      "keyFiles": [
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "README.md",
+        "configuration.mdx"
+      ]
+    },
+    "pdfs": {
+      "path": "pdfs",
+      "purpose": null,
+      "fileCount": 116,
+      "lastAccessed": 1775505019166,
+      "keyFiles": [
+        "149_01_NPD_Paper_No.10_Lithology__Well_7_11_1.pdf",
+        "149_01_WDSS_General_Information.pdf",
+        "149_02_NPD_Paper_No.10_Interpreted_Lithology_log__Well_7_11_1.pdf",
+        "149_03_NPD_Paper_No.10_Lithologic_Correlation_chart__Well_7_11_1.pdf",
+        "149_04_NPD_Paper_No.10_Paleocene_Correlation_map__Well_7_11_1.pdf"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "extract_casing_data.py",
+      "accessCount": 15,
+      "lastAccessed": 1775505254169,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
