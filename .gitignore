@@ -2,14 +2,5 @@ pdfs/
 Runs/
 __pycache__/
 *.pyc
-skills-lock.json
-CLAUDE.md
 .env
 *.pdf
-.agents/
-.claude/
-.DS_Store
-.Rhistory
-Wellvector Progress.md
-tracking.py
-.omc
